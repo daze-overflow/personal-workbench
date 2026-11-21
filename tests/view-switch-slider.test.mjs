@@ -174,3 +174,60 @@ test("窄屏与减少动效下仍然成立", async () => {
   assert.ok(Math.abs(quick.thumb.x - quick.active.x) <= 1, "减少动效下应直接落位");
   await reduced.close();
 });
+
+test("切换视图时搜索框宽度零抖动，演练首屏导航与参数重置单行紧致", async () => {
+  const page = await browser.newPage({ viewport: { width: 1440, height: 900 } });
+  try {
+    await page.goto(BASE, { waitUntil: "load" });
+    await page.waitForSelector(".global-search");
+    const widthOf = () => page.evaluate(() => Math.round(document.querySelector(".global-search").getBoundingClientRect().width));
+    const courseW = await widthOf();
+
+    await page.click("#workbenchToggle");
+    await page.waitForSelector('.prototype-workbench-session[data-kind="digital"] .circuit-workbench', { state: "visible", timeout: 8000 });
+    await page.waitForTimeout(300);
+    const wbW = await widthOf();
+
+    await page.click("#practiceToggle");
+    await page.waitForSelector(".notebook-demo", { state: "visible", timeout: 8000 });
+    await page.waitForTimeout(300);
+    const practiceW = await widthOf();
+
+    assert.ok(Math.abs(courseW - wbW) <= 1 && Math.abs(wbW - practiceW) <= 1,
+      `跨视图切换搜索框宽度不应抖动（course=${courseW}, workbench=${wbW}, practice=${practiceW}）`);
+
+    await page.setViewportSize({ width: 1280, height: 720 });
+    await page.waitForTimeout(250);
+    const layout = await page.evaluate(() => {
+      const chapters = document.querySelector(".practice-chapters").getBoundingClientRect();
+      const bubble = document.querySelector(".practice-bubble").getBoundingClientRect();
+      const fields = [...document.querySelectorAll(".demo-controls > .demo-field")].map((el) => el.getBoundingClientRect().top);
+      return {
+        chaptersTop: chapters.top,
+        bubbleTop: bubble.top,
+        fieldSpread: Math.max(...fields) - Math.min(...fields),
+      };
+    });
+    assert.ok(Math.abs(layout.chaptersTop - layout.bubbleTop) <= 8,
+      `1280×720 演练章节条与实验胶囊应同行对齐（${JSON.stringify(layout)}）`);
+    assert.ok(layout.fieldSpread <= 4,
+      `1280×720 演练参数控件（含重置按钮）应保持单行（spread=${layout.fieldSpread}）`);
+
+    await page.setViewportSize({ width: 1440, height: 900 });
+    await page.click('.practice-chapter[data-chapter-id="signals-ch5"]');
+    await page.waitForTimeout(300);
+    const ch5Strip = await page.evaluate(() => {
+      const chapters = document.querySelector(".practice-chapters");
+      return {
+        scrollW: chapters.scrollWidth,
+        clientW: chapters.clientWidth,
+        overflowX: getComputedStyle(chapters).overflowX,
+      };
+    });
+    assert.equal(ch5Strip.overflowX, "visible", "桌面端演练章节条不应产生横向滚动条");
+    assert.ok(ch5Strip.scrollW <= ch5Strip.clientW,
+      `切到第5章后章节条不应水平溢出（scrollW=${ch5Strip.scrollW} clientW=${ch5Strip.clientW}）`);
+  } finally {
+    await page.close();
+  }
+});

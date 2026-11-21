@@ -68,6 +68,21 @@ test("前两章数学排版在手机和桌面均不撑破正文，公式说明�
     for (const chapter of [1, 2]) {
       const page = await browser.newPage();
       await open(page, chapter, width);
+      if (chapter === 1 && width === 1440) {
+        /* 顺带校验第 3 节相关链接中的 z=e^{sT} 经规范化后无 ^( 残留 */
+        await page.locator('#lessonPartNav .lesson-part-tab[data-part="2"]').click();
+        await page.waitForSelector("#section-signals-ch1-laplace");
+        const laplaceState = await page.evaluate(() => ({
+          linkText: document.querySelector("#section-signals-ch1-laplace .section-links")?.textContent || "",
+          linkKatex: document.querySelectorAll("#section-signals-ch1-laplace .section-link .katex").length,
+          errors: document.querySelectorAll(".katex-error").length,
+        }));
+        assert.doesNotMatch(laplaceState.linkText, /e\^\(/, "z=e^{sT} 不应保留未规范化的 ^(");
+        assert.ok(laplaceState.linkKatex >= 1, "相关链接行内公式应正常渲染");
+        assert.equal(laplaceState.errors, 0);
+        await page.locator('#lessonPartNav .lesson-part-tab[data-part="0"]').click();
+        await page.waitForSelector("#section-signals-ch1-time-singular");
+      }
       const state = await page.evaluate(() => ({
         overflow: document.documentElement.scrollWidth - innerWidth,
         errors: document.querySelectorAll(".katex-error").length,

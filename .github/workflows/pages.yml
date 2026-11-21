@@ -24,6 +24,7 @@ jobs:
       - name: Validate runtime syntax
         run: |
           node --check app.js
+          node --check lesson-visuals.js
           node --check courses.js
           node --check workbench.bundle.js
           node --check katex.bundle.js

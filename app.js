@@ -130,6 +130,10 @@
     var systemPrefersDark = window.matchMedia("(prefers-color-scheme: dark)").matches;
     document.documentElement.dataset.theme = resolvedTheme(themePreference, systemPrefersDark);
     document.documentElement.dataset.themePreference = themePreference;
+    var schemeMeta = document.querySelector('meta[name="color-scheme"]');
+    if (schemeMeta) {
+      schemeMeta.content = themePreference === "system" ? "light dark" : themePreference;
+    }
     document.getElementById("themeLabel").textContent = themeShortLabels[themePreference];
     document.getElementById("themeIcon").innerHTML = themeIcons[themePreference];
     themeToggle.setAttribute("aria-label", "外观模式：" + themeLabels[themePreference] + "。点击切换");
@@ -146,7 +150,16 @@
   themeToggle.addEventListener("click", function () {
     var index = themePreferences.indexOf(themePreference);
     themePreference = themePreferences[(index + 1) % themePreferences.length];
-    try { localStorage.setItem(THEME_STORAGE_KEY, themePreference); } catch (e) { /* 忽略 */ }
+    try {
+      if (themePreference === "system") localStorage.removeItem(THEME_STORAGE_KEY);
+      else localStorage.setItem(THEME_STORAGE_KEY, themePreference);
+    } catch (e) { /* 忽略 */ }
+    applyThemePreference();
+  });
+
+  window.addEventListener("storage", function (event) {
+    if (event.key !== THEME_STORAGE_KEY) return;
+    themePreference = isThemePreference(event.newValue) ? event.newValue : "system";
     applyThemePreference();
   });
 
@@ -239,17 +252,18 @@
   var lastY = window.scrollY;
   var mobileTopbar = window.matchMedia("(max-width: 760px)");
   window.addEventListener("scroll", function () {
-    var y = window.scrollY;
+    var maxY = Math.max(0, document.documentElement.scrollHeight - window.innerHeight);
+    var y = Math.min(Math.max(window.scrollY, 0), maxY);
     if (mobileTopbar.matches) {
       topbar.classList.remove("is-hidden");
       shell.classList.remove("has-topbar-hidden");
       lastY = y;
       return;
     }
-    if (y > lastY && y > 140) {
+    if (y > lastY + 2 && y > 140) {
       topbar.classList.add("is-hidden");
       shell.classList.add("has-topbar-hidden");
-    } else if (y < lastY - 2 || y <= 140) {
+    } else if (y <= 140 || (y < lastY - 8 && (maxY <= 140 || y < maxY - 24))) {
       topbar.classList.remove("is-hidden");
       shell.classList.remove("has-topbar-hidden");
     }
@@ -281,12 +295,23 @@
     });
   }
 
-  function switchChapter(chapterId) {
+  function switchChapter(chapterId, targetPartKey) {
     if (chapterId === currentChapter) return;
     clearTimeout(chapterTimer);
     /* 选中态立刻落位；正文仍在 150ms 后替换 */
     currentChapter = chapterId;
-    currentSectionId = null;
+    var course = courses.find(function (candidate) { return candidate.id === currentSubject; });
+    var targetChapter = course && course.chapters.find(function (candidate) { return candidate.id === chapterId; });
+    var usesSplit = chapterUsesPartSplit(course, targetChapter);
+    currentPartKey = targetPartKey !== undefined ? targetPartKey : 0;
+    if (usesSplit) {
+      var targetParts = chapterPartsOf(course, chapterId);
+      currentSectionId = (typeof currentPartKey === "number" && targetParts[currentPartKey])
+        ? (targetParts[currentPartKey].sectionIds[0] || null)
+        : null;
+    } else {
+      currentSectionId = null;
+    }
     markCurrentChapter(chapterId);
     markCurrentSection();
     var lesson = document.querySelector(".lesson");
@@ -312,6 +337,19 @@
   prevChapterButton.addEventListener("click", function () { moveChapter(-1); });
   nextChapterButton.addEventListener("click", function () { moveChapter(1); });
 
+  function normalizeInlineTex(expr) {
+    return String(expr || "")
+      /* 修正 e^(sT)、0.5^(n+1) 等非大括号上标（避开 MATLAB .^( 语法） */
+      .replace(/(^|[^.])\^\(([^()]+)\)/g, "$1^{$2}")
+      /* 修正 10^-4、10^-8、R^-1 等负整数上标（保留 P_k^- 单独负号） */
+      .replace(/\^(-[0-9]+)/g, "^{$1}")
+      /* 修正 \sqrt (expr) 与 \sqrt 1.1220 */
+      .replace(/\\sqrt\s*\(([^()]+)\)/g, "\\sqrt{$1}")
+      .replace(/\\sqrt\s+([0-9]+(?:\.[0-9]+)?)/g, "\\sqrt{$1}")
+      /* 修正行内公式中未转义的 % 导致注释截断 */
+      .replace(/(^|[^\\])%/g, "$1\\%");
+  }
+
   function textElement(tag, text, className) {
     var element = document.createElement(tag);
     /* 只解析课程作者显式写出的数学/代码标记；普通文字始终走文本节点。
@@ -327,7 +365,7 @@
       } else {
         part.className = token[2] !== undefined ? "math-display" : "math-inline";
         if (window.KaTeX) {
-          part.innerHTML = window.KaTeX.renderToString(token[1] || token[2], {
+          part.innerHTML = window.KaTeX.renderToString(normalizeInlineTex(token[1] || token[2]), {
             displayMode: token[2] !== undefined, throwOnError: false, strict: false, trust: false
           });
         } else {
@@ -762,6 +800,13 @@
   function openTarget(target) {
     var resolved = resolveTarget(target);
     if (!resolved) return;
+    if (resolved.course.id === currentSubject && resolved.chapter.id === currentChapter && resolved.sectionId) {
+      openSection(resolved.chapter.id, resolved.sectionId);
+      return;
+    }
+    pendingPartKey = (resolved.sectionId && chapterUsesPartSplit(resolved.course, resolved.chapter))
+      ? partIndexForSection(resolved.course, resolved.chapter, resolved.sectionId)
+      : 0;
     jumpToChapter(resolved.chapter.id);
     if (!resolved.sectionId) return;
     /* switchSubject 有 150ms 淡出，等新内容挂载后再滚到锚点 */
@@ -778,12 +823,194 @@
     return button;
   }
 
+  function mountSectionVisual(block, sectionId, phase) {
+    if (!sectionId || !window.LessonVisuals || typeof window.LessonVisuals.get !== "function") return;
+    var spec = window.LessonVisuals.get(sectionId);
+    if (!spec) return;
+    var targetPhase = spec.placement || (spec.layout === "inline" ? "beside-prose" : "before-formula");
+    if (targetPhase !== phase) return;
+    var visual = window.LessonVisuals.createElement(sectionId);
+    if (visual) block.appendChild(visual);
+  }
+
+  /* 当前章节按"节"拆分阅读的状态：任意课程划分了节（section.group）的章节自动启用 */
+  var currentPartKey = 0;
+  var pendingPartKey = null;
+
+  function chapterUsesPartSplit(course, chapter) {
+    return !!(course && chapter && (chapter.sections || []).some(function (s) { return !!s.group; }));
+  }
+
+  function chapterHasResources(chapter) {
+    if (!chapter) return false;
+    return !!(
+      (chapter.examples && chapter.examples.length) ||
+      (chapter.experiments && chapter.experiments.length) ||
+      (chapter.check && chapter.check.length) ||
+      (chapter.summary && chapter.summary.length) ||
+      (chapter.connections && chapter.connections.length) ||
+      (chapter.sourceRef && chapter.sourceRef.length)
+    );
+  }
+
+  function partIndexForSection(course, chapter, sectionId) {
+    if (!course || !chapter || !sectionId) return 0;
+    var parts = chapterPartsOf(course, chapter.id);
+    for (var i = 0; i < parts.length; i += 1) {
+      if (parts[i].sectionIds.indexOf(sectionId) !== -1) return i;
+    }
+    return 0;
+  }
+
+  function ensurePartNav() {
+    var nav = document.getElementById("lessonPartNav");
+    if (nav) return nav;
+    var heading = document.querySelector(".lesson-heading");
+    if (!heading || !heading.parentNode) return null;
+    nav = document.createElement("nav");
+    nav.id = "lessonPartNav";
+    nav.className = "lesson-part-nav";
+    nav.setAttribute("aria-label", "本章按节切换");
+    heading.insertAdjacentElement("afterend", nav);
+    return nav;
+  }
+
+  function switchPart(nextPartKey, scrollSectionId) {
+    var course = courses.find(function (candidate) { return candidate.id === currentSubject; });
+    var chapter = course && course.chapters.find(function (candidate) { return candidate.id === currentChapter; });
+    if (!course || !chapter || !chapterUsesPartSplit(course, chapter)) return;
+    var parts = chapterPartsOf(course, chapter.id);
+    currentPartKey = nextPartKey;
+    if (typeof nextPartKey === "number" && parts[nextPartKey]) {
+      currentSectionId = scrollSectionId || parts[nextPartKey].sectionIds[0] || null;
+    } else {
+      currentSectionId = null;
+    }
+    markCurrentSection();
+    renderLesson(course, chapter);
+    if (scrollSectionId) {
+      var targetNode = document.getElementById("section-" + scrollSectionId);
+      if (targetNode) {
+        lockSectionSync();
+        targetNode.scrollIntoView({ behavior: "smooth", block: "start" });
+        return;
+      }
+    }
+    window.scrollTo({ top: 0, behavior: "auto" });
+    topbar.classList.remove("is-hidden");
+    shell.classList.remove("has-topbar-hidden");
+  }
+
+  function appendPartPager(container, course, chapter, parts, hasResources, usePartSplit) {
+    var meta = "";
+    var title = "";
+    var onClick = null;
+
+    if (usePartSplit && currentPartKey !== "resources") {
+      var idx = Number(currentPartKey);
+      if (idx + 1 < parts.length) {
+        meta = "下一节";
+        title = partLabel(parts[idx + 1].label);
+        onClick = (function (targetKey) {
+          return function () { switchPart(targetKey); };
+        })(idx + 1);
+      } else if (hasResources) {
+        meta = "下一节";
+        title = "巩固与检验";
+        onClick = function () { switchPart("resources"); };
+      }
+    } else {
+      var chapIdx = course.chapters.findIndex(function (candidate) { return candidate.id === chapter.id; });
+      if (chapIdx >= 0 && chapIdx + 1 < course.chapters.length) {
+        var nextChapter = course.chapters[chapIdx + 1];
+        meta = "下一章";
+        var nextNum = /^\d+$/.test(String(nextChapter.number))
+          ? "第" + nextChapter.number + "章"
+          : nextChapter.number;
+        title = nextNum + " " + nextChapter.title;
+        onClick = (function (nextId) {
+          return function () { switchChapter(nextId, 0); };
+        })(nextChapter.id);
+      }
+    }
+
+    if (!onClick) return;
+    var pager = document.createElement("div");
+    pager.className = "lesson-part-pager";
+    var btn = document.createElement("button");
+    btn.type = "button";
+    btn.className = "part-pager-btn is-next";
+    btn.appendChild(textElement("span", meta, "part-pager-meta"));
+    btn.appendChild(textElement("strong", title));
+    var arrow = document.createElement("span");
+    arrow.className = "part-pager-arrow";
+    arrow.setAttribute("aria-hidden", "true");
+    arrow.textContent = "→";
+    btn.appendChild(arrow);
+    btn.addEventListener("click", onClick);
+    pager.appendChild(btn);
+    container.appendChild(pager);
+  }
+
   function renderLesson(course, chapter) {
+    var lessonEl = document.querySelector(".lesson");
+    if (lessonEl) lessonEl.dataset.subject = course.id;
     lessonTitle.textContent = chapter.title;
     lessonGuideContent.textContent = "";
     lessonFocusList.textContent = "";
     lessonBody.textContent = "";
     lessonResources.textContent = "";
+
+    var parts = chapterPartsOf(course, chapter.id);
+    var usePartSplit = chapterUsesPartSplit(course, chapter) && parts.length > 0;
+    var hasResources = chapterHasResources(chapter);
+    if (usePartSplit) {
+      if (currentPartKey === "resources") {
+        if (!hasResources) currentPartKey = 0;
+      } else {
+        var numericPart = Number(currentPartKey);
+        if (!Number.isInteger(numericPart) || numericPart < 0 || numericPart >= parts.length) numericPart = 0;
+        currentPartKey = numericPart;
+      }
+      if (currentPartKey !== "resources" && !currentSectionId && parts[currentPartKey]) {
+        currentSectionId = parts[currentPartKey].sectionIds[0] || null;
+      }
+    } else {
+      currentPartKey = 0;
+    }
+
+    var partNav = ensurePartNav();
+    if (partNav) {
+      partNav.textContent = "";
+      partNav.hidden = !usePartSplit;
+      if (usePartSplit) {
+        parts.forEach(function (part, partIdx) {
+          var tab = document.createElement("button");
+          tab.type = "button";
+          var isActiveTab = currentPartKey === partIdx;
+          tab.className = "lesson-part-tab" + (isActiveTab ? " is-active" : "");
+          tab.dataset.part = String(partIdx);
+          tab.setAttribute("aria-pressed", isActiveTab ? "true" : "false");
+          tab.textContent = partLabel(part.label);
+          tab.addEventListener("click", function () { switchPart(partIdx); });
+          partNav.appendChild(tab);
+        });
+        if (hasResources) {
+          var resTab = document.createElement("button");
+          resTab.type = "button";
+          var isResActive = currentPartKey === "resources";
+          resTab.className = "lesson-part-tab is-resources" + (isResActive ? " is-active" : "");
+          resTab.dataset.part = "resources";
+          resTab.setAttribute("aria-pressed", isResActive ? "true" : "false");
+          resTab.textContent = "巩固与检验";
+          resTab.addEventListener("click", function () { switchPart("resources"); });
+          partNav.appendChild(resTab);
+        }
+      }
+    }
+
+    var isResourcesView = usePartSplit && currentPartKey === "resources";
+    var activeGroup = (usePartSplit && !isResourcesView && parts[currentPartKey]) ? parts[currentPartKey].label : null;
 
     /* 课程导读（教材版本、完成规则这类参考信息）只在绪论章出现一次；
        其余章节整块收起，避免每章重复同一段版本/规则说明。
@@ -805,7 +1032,7 @@
       lessonFocusList.appendChild(textElement("li", objective));
     });
 
-    if (chapter.prerequisites.length) {
+    if (chapter.prerequisites.length && (!usePartSplit || currentPartKey === 0)) {
       var prerequisites = appendContentGroup(lessonBody, "前置知识");
       var tags = document.createElement("div");
       tags.className = "prerequisite-list";
@@ -816,15 +1043,21 @@
     }
 
     var lastGroup = null;
+    var showFocus = !usePartSplit || currentPartKey === 0;
     var focusPlaced = false;
+    if (lessonFocus) lessonFocus.hidden = !showFocus;
+    if (!showFocus && lessonFocus && lessonFocus.parentNode) {
+      lessonFocus.parentNode.removeChild(lessonFocus);
+    }
     /* 有分组的章：本章重点跟在第一节分组条之后（章标题、前置知识仍留在正文之上）；
        无分组的章（数电、模电等尚未细分）：挂在正文最前。整块只出现这一次。 */
-    if (!chapter.sections.some(function (item) { return !!item.group; })) {
+    if (showFocus && !chapter.sections.some(function (item) { return !!item.group; })) {
       lessonBody.appendChild(lessonFocus);
       focusPlaced = true;
     }
 
     chapter.sections.forEach(function (section, sectionIndex) {
+      if (usePartSplit && (isResourcesView || section.group !== activeGroup)) return;
       /* 节分组条：小节带 group 时，组一变就插一条。
          数据侧保证同组小节连续且不跳回（由 tests/course-content.test.mjs 的分组守卫兜住）。 */
       if (section.group && section.group !== lastGroup) {
@@ -833,7 +1066,7 @@
         groupBar.className = "lesson-group";
         groupBar.appendChild(textElement("h2", section.group));
         lessonBody.appendChild(groupBar);
-        if (!focusPlaced) {
+        if (showFocus && !focusPlaced) {
           lessonBody.appendChild(lessonFocus);
           focusPlaced = true;
         }
@@ -849,11 +1082,13 @@
         heading.appendChild(textElement("span", "选择学习", "importance-label"));
       }
       block.appendChild(heading);
+      mountSectionVisual(block, section.id, "beside-prose");
       if (section.content) block.appendChild(textElement("p", section.content, "section-lead"));
       /* 展开段（关键关系 / 量级算例 / 边界条件）：内容充实规划里正文的第二段起 */
       (section.detail || []).forEach(function (paragraph) {
         block.appendChild(textElement("p", paragraph, "section-detail"));
       });
+      mountSectionVisual(block, section.id, "before-formula");
       if (section.formula) {
         /* KaTeX 渲染公式（与原站 MathFormula 同参数：displayMode + 不抛错） */
         var formulaCard = document.createElement("div");
@@ -912,98 +1147,102 @@
       lessonBody.appendChild(block);
     });
 
-    /* 章末「章节联系」：前置 / 后续 / 跨课程 三组，条目可点击跳到目标章或目标小节 */
-    if (chapter.connections && chapter.connections.length) {
-      var connectionGroup = appendContentGroup(lessonBody, "章节联系");
-      [
-        { kind: "prereq", label: "前置" },
-        { kind: "next", label: "后续" },
-        { kind: "cross", label: "跨课程" }
-      ].forEach(function (entry) {
-        var items = chapter.connections.filter(function (item) { return item.kind === entry.kind; });
-        if (!items.length) return;
-        var group = document.createElement("div");
-        group.className = "connection-group";
-        group.appendChild(textElement("span", entry.label, "connection-kind"));
-        var list = document.createElement("div");
-        list.className = "connection-list";
-        items.forEach(function (link) { list.appendChild(linkButton(link, "connection-item")); });
-        group.appendChild(list);
-        connectionGroup.appendChild(group);
-      });
-    }
-
-    if (chapter.sourceRef && chapter.sourceRef.length) {
-      var sourceNote = document.createElement("details");
-      sourceNote.className = "source-note";
-      sourceNote.appendChild(textElement("summary", "材料出处"));
-      appendList(sourceNote, chapter.sourceRef, false);
-      lessonBody.appendChild(sourceNote);
-    }
-
-    if (chapter.examples.length) {
-      var examples = appendContentGroup(lessonResources, "典型例题");
-      chapter.examples.forEach(function (example) {
-        var card = document.createElement("article");
-        card.className = "text-card worked-example";
-        card.appendChild(textElement("h3", example.title));
-        card.appendChild(textElement("p", example.prompt));
-        appendList(card, example.steps, true);
-        var answer = document.createElement("details");
-        answer.appendChild(textElement("summary", "查看答案与结论"));
-        answer.appendChild(textElement("p", "结论：" + example.answer));
-        card.appendChild(answer);
-        examples.appendChild(card);
-      });
-    }
-
-    if (chapter.experiments.length) {
-      var experiments = appendContentGroup(lessonResources, "动手实验");
-      chapter.experiments.forEach(function (experiment) {
-        var card = document.createElement("article");
-        card.className = "text-card experiment-card";
-        /* 卡头：课程·章号 + 标题 ｜ 右侧工作台类型标签 */
-        var cardHead = document.createElement("header");
-        cardHead.className = "card-head";
-        var headCopy = document.createElement("div");
-        headCopy.appendChild(textElement("span", course.title + " · " + chapter.number, "card-meta"));
-        headCopy.appendChild(textElement("h3", experiment.title));
-        cardHead.appendChild(headCopy);
-        var kindLabel = experiment.workbench === "notebook"
-          ? "实验演练"
-          : (experiment.workbench === "digital" ? "数字工作台" : "模拟工作台");
-        cardHead.appendChild(textElement("em", kindLabel, "card-kind"));
-        card.appendChild(cardHead);
-        card.appendChild(textElement("p", "验证目标：" + experiment.goal));
-        appendList(card, experiment.steps, true);
-        card.appendChild(textElement("p", "预期证据：" + experiment.expected, "expected-result"));
-        /* 打开按钮：Notebook 进入步骤页，电路实验进入对应工作台。 */
-        var openButton = document.createElement("button");
-        openButton.type = "button";
-        openButton.className = "secondary experiment-open-btn";
-        openButton.textContent = experiment.workbench === "notebook" ? "打开实验" : "在工作台中打开 →";
-        openButton.addEventListener("click", function () {
-          if (experiment.workbench === "notebook") {
-            openNotebookExperiment(experiment, chapter);
-            return;
-          }
-          pendingExperimentId = experiment.id;
-          setView(experiment.workbench);
+    if (!usePartSplit || isResourcesView) {
+      /* 章末「章节联系」：前置 / 后续 / 跨课程 三组，条目可点击跳到目标章或目标小节 */
+      if (chapter.connections && chapter.connections.length) {
+        var connectionGroup = appendContentGroup(lessonBody, "章节联系");
+        [
+          { kind: "prereq", label: "前置" },
+          { kind: "next", label: "后续" },
+          { kind: "cross", label: "跨课程" }
+        ].forEach(function (entry) {
+          var items = chapter.connections.filter(function (item) { return item.kind === entry.kind; });
+          if (!items.length) return;
+          var group = document.createElement("div");
+          group.className = "connection-group";
+          group.appendChild(textElement("span", entry.label, "connection-kind"));
+          var list = document.createElement("div");
+          list.className = "connection-list";
+          items.forEach(function (link) { list.appendChild(linkButton(link, "connection-item")); });
+          group.appendChild(list);
+          connectionGroup.appendChild(group);
         });
-        card.appendChild(openButton);
-        experiments.appendChild(card);
-      });
+      }
+
+      if (chapter.sourceRef && chapter.sourceRef.length) {
+        var sourceNote = document.createElement("details");
+        sourceNote.className = "source-note";
+        sourceNote.appendChild(textElement("summary", "材料出处"));
+        appendList(sourceNote, chapter.sourceRef, false);
+        lessonBody.appendChild(sourceNote);
+      }
+
+      if (chapter.examples.length) {
+        var examples = appendContentGroup(lessonResources, "典型例题");
+        chapter.examples.forEach(function (example) {
+          var card = document.createElement("article");
+          card.className = "text-card worked-example";
+          card.appendChild(textElement("h3", example.title));
+          card.appendChild(textElement("p", example.prompt));
+          appendList(card, example.steps, true);
+          var answer = document.createElement("details");
+          answer.appendChild(textElement("summary", "查看答案与结论"));
+          answer.appendChild(textElement("p", "结论：" + example.answer));
+          card.appendChild(answer);
+          examples.appendChild(card);
+        });
+      }
+
+      if (chapter.experiments.length) {
+        var experiments = appendContentGroup(lessonResources, "动手实验");
+        chapter.experiments.forEach(function (experiment) {
+          var card = document.createElement("article");
+          card.className = "text-card experiment-card";
+          /* 卡头：课程·章号 + 标题 ｜ 右侧工作台类型标签 */
+          var cardHead = document.createElement("header");
+          cardHead.className = "card-head";
+          var headCopy = document.createElement("div");
+          headCopy.appendChild(textElement("span", course.title + " · " + chapter.number, "card-meta"));
+          headCopy.appendChild(textElement("h3", experiment.title));
+          cardHead.appendChild(headCopy);
+          var kindLabel = experiment.workbench === "notebook"
+            ? "实验演练"
+            : (experiment.workbench === "digital" ? "数字工作台" : "模拟工作台");
+          cardHead.appendChild(textElement("em", kindLabel, "card-kind"));
+          card.appendChild(cardHead);
+          card.appendChild(textElement("p", "验证目标：" + experiment.goal));
+          appendList(card, experiment.steps, true);
+          card.appendChild(textElement("p", "预期证据：" + experiment.expected, "expected-result"));
+          /* 打开按钮：Notebook 进入步骤页，电路实验进入对应工作台。 */
+          var openButton = document.createElement("button");
+          openButton.type = "button";
+          openButton.className = "secondary experiment-open-btn";
+          openButton.textContent = experiment.workbench === "notebook" ? "打开实验" : "在工作台中打开 →";
+          openButton.addEventListener("click", function () {
+            if (experiment.workbench === "notebook") {
+              openNotebookExperiment(experiment, chapter);
+              return;
+            }
+            pendingExperimentId = experiment.id;
+            setView(experiment.workbench);
+          });
+          card.appendChild(openButton);
+          experiments.appendChild(card);
+        });
+      }
+
+      if (chapter.check.length) {
+        var checks = appendContentGroup(lessonResources, "章节检验");
+        renderChapterCheck(checks, chapter);
+      }
+
+      if (chapter.summary.length) {
+        var summary = appendContentGroup(lessonResources, "复习总结");
+        appendList(summary, chapter.summary, false);
+      }
     }
 
-    if (chapter.check.length) {
-      var checks = appendContentGroup(lessonResources, "章节检验");
-      renderChapterCheck(checks, chapter);
-    }
-
-    if (chapter.summary.length) {
-      var summary = appendContentGroup(lessonResources, "复习总结");
-      appendList(summary, chapter.summary, false);
-    }
+    appendPartPager(lessonResources, course, chapter, parts, hasResources, usePartSplit);
   }
 
   /* ===== 章节目录：一章一行 + 展开箭头（与面板收起按钮同款 .icon-toggle）；
@@ -1036,7 +1275,15 @@
 
   function scrollToSection(sectionId) {
     var node = document.getElementById("section-" + sectionId);
-    if (!node) return;
+    if (!node) {
+      var course = courses.find(function (candidate) { return candidate.id === currentSubject; });
+      var chapter = course && course.chapters.find(function (candidate) { return candidate.id === currentChapter; });
+      if (chapterUsesPartSplit(course, chapter)) {
+        var targetPart = partIndexForSection(course, chapter, sectionId);
+        switchPart(targetPart, sectionId);
+      }
+      return;
+    }
     /* 目录里点了哪一节，选中态就立刻落到哪一节——不等平滑滚动到达，
        否则高亮要等滚动结束才动，看起来就是慢一拍 */
     if (sectionId !== currentSectionId) {
@@ -1049,9 +1296,17 @@
 
   /* 点小节：先保证章已打开，再滚到小节锚点（switchChapter 有 150ms 淡出） */
   function openSection(chapterId, sectionId) {
+    var course = courses.find(function (candidate) { return candidate.id === currentSubject; });
+    var chapter = course && course.chapters.find(function (candidate) { return candidate.id === chapterId; });
+    var usesSplit = chapterUsesPartSplit(course, chapter);
+    var targetPart = usesSplit ? partIndexForSection(course, chapter, sectionId) : 0;
     if (chapterId !== currentChapter) {
-      switchChapter(chapterId);
+      switchChapter(chapterId, targetPart);
       window.setTimeout(function () { scrollToSection(sectionId); }, 320);
+      return;
+    }
+    if (usesSplit && currentPartKey !== targetPart) {
+      switchPart(targetPart, sectionId);
       return;
     }
     scrollToSection(sectionId);
@@ -1096,10 +1351,19 @@
   }
 
   function markCurrentSection() {
+    var lessonRoot = document.querySelector(".lesson");
+    var course = courses.find(function (candidate) { return candidate.id === currentSubject; });
+    var chapter = course && course.chapters.find(function (candidate) { return candidate.id === currentChapter; });
     var parts = chapterPartsByChapter[currentChapter] || [];
     var activePart = -1;
-    for (var i = 0; i < parts.length; i += 1) {
-      if (parts[i].sectionIds.indexOf(currentSectionId) !== -1) { activePart = i; break; }
+    if (lessonRoot && lessonRoot.offsetHeight === 0) {
+      activePart = -1;
+    } else if (chapterUsesPartSplit(course, chapter)) {
+      activePart = (typeof currentPartKey === "number" && parts[currentPartKey]) ? currentPartKey : -1;
+    } else {
+      for (var i = 0; i < parts.length; i += 1) {
+        if (parts[i].sectionIds.indexOf(currentSectionId) !== -1) { activePart = i; break; }
+      }
     }
     var scope = chapterList.querySelector('.chapter-item[data-chapter="' + currentChapter + '"]') || chapterList;
     Array.prototype.forEach.call(scope.querySelectorAll(".chapter-part"), function (button) {
@@ -1118,6 +1382,12 @@
         currentSectionId = null;
         markCurrentSection();
       }
+      return;
+    }
+    var course = courses.find(function (candidate) { return candidate.id === currentSubject; });
+    var chapter = course && course.chapters.find(function (candidate) { return candidate.id === currentChapter; });
+    if (chapterUsesPartSplit(course, chapter)) {
+      markCurrentSection();
       return;
     }
     var nodes = lessonBody.querySelectorAll(".learning-section[id]");
@@ -1260,6 +1530,9 @@
     switchTimer = setTimeout(function () {
       currentSubject = target;
       currentChapter = chapterId || subjects[currentSubject].current;
+      currentPartKey = pendingPartKey !== null ? pendingPartKey : 0;
+      pendingPartKey = null;
+      currentSectionId = null;
       subjectTabs.forEach(function (other) {
         if (other.dataset.subject === target) selectSubjectTab(other);
       });
@@ -5282,8 +5555,9 @@
       var entering = viewElement(wbKind);
       entering.offsetHeight;   /* 强制回流：透明度过渡在元素显示后才启动 */
       /* 舞台此刻才真正参与布局：在这里再落一次工作台滑块（此前 hidden 状态下测量值全是 0），
-         并同步画布中心提示的位置 */
+         并同步演练章节滑块与画布中心提示的位置 */
       if (isCircuitWorkbench(wbKind)) syncKindSwitcher(true);
+      if (wbKind === "notebook") syncPracticeChapterThumb(notebookRoot.querySelector(".practice-chapters"), true);
       scheduleCanvasEmptyHint();
       entering.style.opacity = 1;
       if (wbKind === "notebook") {

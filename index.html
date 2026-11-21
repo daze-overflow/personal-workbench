@@ -3,6 +3,22 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <meta name="color-scheme" content="light dark" />
+  <script>
+    try {
+      var p = localStorage.getItem("personal-workbench-theme");
+      var m = document.querySelector('meta[name="color-scheme"]');
+      if (p === "light" || p === "dark") {
+        if (m) m.content = p;
+        document.documentElement.dataset.theme = p;
+        document.documentElement.dataset.themePreference = p;
+      } else {
+        var dark = window.matchMedia && window.matchMedia("(prefers-color-scheme: dark)").matches;
+        document.documentElement.dataset.theme = dark ? "dark" : "light";
+        document.documentElement.dataset.themePreference = "system";
+      }
+    } catch (e) {}
+  </script>
   <title>个人电子工作台</title>
   <link rel="stylesheet" href="./styles.css" />
   <link rel="stylesheet" href="./katex.min.css" />
@@ -121,6 +137,7 @@
   <script src="./courses.js"></script>
   <script src="./katex.bundle.js"></script>
   <script src="./workbench.bundle.js"></script>
+  <script src="./lesson-visuals.js"></script>
   <script src="./app.js"></script>
 </body>
 </html>

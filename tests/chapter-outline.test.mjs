@@ -218,7 +218,7 @@ test("选中章与未选中章：底色差可测量，且带左侧标记条", as
       contrast.ratio >= 1.35,
       `[${scheme}] 选中章与未选中章的底色对比只有 ${contrast.ratio.toFixed(2)}：${contrast.selectedBg} vs ${contrast.otherBg}`,
     );
-    assert.match(contrast.shadow, /inset/, `[${scheme}] 选中章缺少左侧标记条：${contrast.shadow}`);
+    assert.equal(contrast.shadow, "none", `[${scheme}] 选中章不再使用侧边强调线：${contrast.shadow}`);
     assert.ok(contrast.weight >= 800, `[${scheme}] 选中章标题应加重，实际 ${contrast.weight}`);
 
     await page.close();
@@ -243,9 +243,9 @@ test("目录里的当前节跟随滚动点亮", async () => {
   assert.equal(state.count, 1, "同一时刻只能有一个当前节");
   assert.equal(state.id, "0");
 
-  /* 滚到第三节（复频域）→ 点亮跟着走到第 3 条 */
-  await page.evaluate(() => document.getElementById("section-signals-ch1-laplace").scrollIntoView({ block: "start" }));
-  await page.waitForTimeout(700);
+  /* 切到第三节（复频域）→ 目录高亮跟着走到第 3 条 */
+  await page.locator('.chapter-item[data-chapter="signals-ch1"] .chapter-part').nth(2).click();
+  await page.waitForTimeout(300);
   state = await currentSection();
   assert.equal(state.count, 1);
   assert.equal(state.id, "2", "复频域是第三节，对应目录第 3 条");
@@ -277,15 +277,13 @@ test("目录里的当前节跟随滚动点亮", async () => {
     };
   });
   assert.doesNotMatch(look.part.background, /rgba\(0, 0, 0, 0\)/, "当前节应有底色");
-  assert.match(look.part.shadow, /inset/, "当前节应有左侧标记条");
+  assert.equal(look.part.shadow, "none", "当前节不再使用侧边强调线");
   assert.ok(look.part.weight >= 700, `当前节字重应加重，实际 ${look.part.weight}`);
   assert.ok(
     look.distancePart < look.distanceChapter - 0.1,
     `当前节的底色应比选中章更接近底色：节 ${look.distancePart.toFixed(2)} vs 章 ${look.distanceChapter.toFixed(2)}`,
   );
-  /* Chrome 计算值形如 "rgb(...) 2px 0px 0px 0px inset" */
-  assert.match(look.part.shadow, /2px 0px 0px 0px inset/, "当前节的标记条应比选中章更细（2px vs 3px）");
-  assert.match(look.chapter.shadow, /3px 0px 0px 0px inset/, "选中章的标记条应保持 3px");
+  assert.equal(look.chapter.shadow, "none", "选中章不再使用侧边强调线");
 
   /* 收起列表后：不应再有"看得见"的高亮（类名可以留在隐藏节点上，但不能显示出来） */
   await page.locator('.chapter-item[data-chapter="signals-ch1"] .chapter-toggle').click();
@@ -352,7 +350,7 @@ test("点目录里的节：选中态在同一刻就落到该节，不等平滑�
   });
 
   assert.equal(immediate.count, 5);
-  assert.equal(immediate.before, null, "初始在页面顶部，还没有“当前节”");
+  assert.equal(immediate.before, "0", "按节拆分加载下默认高亮当前第 1 节");
   assert.equal(immediate.after, "3", "点下第 4 节的那一刻，选中态就该落到它");
 
   /* 平滑滚动结束后仍然是它（解锁后的校正不会把它改掉） */
@@ -484,4 +482,29 @@ test("窄屏 760px 与 390px：不提供展开入口，逐章打开也不横向�
 
     await page.close();
   }
+});
+
+test("收起章节目录后切入工作台与演练：内容区保持满宽不塌缩（防图4遮挡Bug）", async () => {
+  const page = await browser.newPage({ viewport: { width: 1440, height: 900 } });
+  await openChapterOne(page);
+  await page.click("#chapterPanelToggle");
+  await page.waitForTimeout(300);
+
+  await page.click("#workbenchToggle");
+  await page.waitForSelector(".circuit-workbench", { state: "visible" });
+  await page.waitForTimeout(400);
+  const wbWidth = await page.evaluate(() => ({
+    workbench: document.querySelector(".circuit-workbench").getBoundingClientRect().width,
+    canvas: document.querySelector(".cw-canvas").getBoundingClientRect().width,
+  }));
+  assert.ok(wbWidth.workbench > 1200, `收起目录切工作台后不应塌缩，实测 ${wbWidth.workbench}px`);
+  assert.ok(wbWidth.canvas > 600, `画布宽度不应塌缩，实测 ${wbWidth.canvas}px`);
+
+  await page.click("#practiceToggle");
+  await page.waitForSelector(".notebook-page", { state: "visible" });
+  await page.waitForTimeout(400);
+  const practiceWidth = await page.evaluate(() => document.querySelector(".notebook-page").getBoundingClientRect().width);
+  assert.ok(practiceWidth > 1200, `收起目录切演练后不应塌缩，实测 ${practiceWidth}px`);
+
+  await page.close();
 });

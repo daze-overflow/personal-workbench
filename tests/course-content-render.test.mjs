@@ -61,40 +61,55 @@ async function settleScroll(page) {
   }
 }
 
-test("信号第 1 章：小节有展开段/要点/易混点，章末有分组章节联系", async () => {
+test("信号第 1 章：按节拆分加载且小节有展开段/要点/易混点，巩固视图有分组章节联系", async () => {
   const page = await browser.newPage();
   await openChapterOne(page);
 
-  const state = await page.evaluate(() => {
-    const sections = Array.from(document.querySelectorAll(".learning-section"));
-    return {
-      sections: sections.map((section) => ({
+  const collectedSections = [];
+  const partCount = await page.locator('#lessonPartNav .lesson-part-tab:not([data-part="resources"])').count();
+  assert.equal(partCount, 5, "第 1 章应有 5 个节标签");
+  for (let i = 0; i < partCount; i += 1) {
+    if (i > 0) {
+      await page.locator(`#lessonPartNav .lesson-part-tab[data-part="${i}"]`).click();
+      await page.waitForTimeout(150);
+    }
+    const partSections = await page.evaluate(() =>
+      Array.from(document.querySelectorAll(".learning-section")).map((section) => ({
         id: section.id,
         paragraphs: section.querySelectorAll(":scope > p").length,
         points: section.querySelectorAll(".section-points li").length,
         pitfalls: section.querySelectorAll(".section-pitfalls li").length,
         links: section.querySelectorAll(".section-link").length,
       })),
-      groups: Array.from(document.querySelectorAll(".connection-group")).map((group) => ({
-        kind: group.querySelector(".connection-kind")?.textContent.trim(),
-        count: group.querySelectorAll(".connection-item").length,
-        clickable: Array.from(group.querySelectorAll(".connection-item")).every((item) => item.tagName === "BUTTON"),
-      })),
-      sourceNote: !!document.querySelector(".source-note"),
-    };
-  });
+    );
+    assert.ok(partSections.length >= 1 && partSections.length <= 6, `第 ${i + 1} 节应按节拆分加载，不整章一次堆叠`);
+    collectedSections.push(...partSections);
+  }
 
-  assert.equal(state.sections.length, 10);
-  for (const section of state.sections) {
+  assert.equal(collectedSections.length, 10);
+  for (const section of collectedSections) {
     assert.ok(section.id.startsWith("section-signals-ch1-"), `小节缺少锚点 id：${section.id}`);
     assert.ok(section.paragraphs >= 3, `${section.id} 应有一段正文加展开段`);
     assert.ok(section.points >= 3, `${section.id} 要点少于 3 条`);
     assert.ok(section.pitfalls >= 1, `${section.id} 缺易混点`);
     assert.ok(section.links >= 1, `${section.id} 缺相关小节链接`);
   }
-  assert.deepEqual(state.groups.map((group) => group.kind), ["前置", "后续", "跨课程"]);
-  assert.ok(state.groups.every((group) => group.count >= 1 && group.clickable), "章节联系条目必须是可点击按钮");
-  assert.ok(state.sourceNote, "缺少材料出处折叠块");
+
+  await page.locator('#lessonPartNav .lesson-part-tab[data-part="resources"]').click();
+  await page.waitForTimeout(150);
+  const resState = await page.evaluate(() => ({
+    groups: Array.from(document.querySelectorAll(".connection-group")).map((group) => ({
+      kind: group.querySelector(".connection-kind")?.textContent.trim(),
+      count: group.querySelectorAll(".connection-item").length,
+      clickable: Array.from(group.querySelectorAll(".connection-item")).every((item) => item.tagName === "BUTTON"),
+    })),
+    sourceNote: !!document.querySelector(".source-note"),
+    sectionsCount: document.querySelectorAll(".learning-section").length,
+  }));
+  assert.equal(resState.sectionsCount, 0, "巩固与检验视图不应重复堆出小节正文");
+  assert.deepEqual(resState.groups.map((group) => group.kind), ["前置", "后续", "跨课程"]);
+  assert.ok(resState.groups.every((group) => group.count >= 1 && group.clickable), "章节联系条目必须是可点击按钮");
+  assert.ok(resState.sourceNote, "缺少材料出处折叠块");
 
   await page.close();
 });
@@ -113,7 +128,6 @@ test("本章重点全章只出现一次，且跟在第一节分组条之后", as
       afterGroupBar: order.indexOf("lesson-focus") === order.indexOf("lesson-group") + 1,
       objectives: document.querySelectorAll("#lessonFocusList li").length,
       headingAboveBody: document.querySelector(".lesson-heading h1").textContent.trim(),
-      labels: Array.from(document.querySelectorAll(".learning-section .importance-label")).map((node) => node.textContent.trim()),
       hasCoreLabel: document.body.textContent.includes("主线必学"),
     };
   });
@@ -123,10 +137,22 @@ test("本章重点全章只出现一次，且跟在第一节分组条之后", as
   assert.ok(state.afterGroupBar, "「本章重点」应紧跟在第一节分组条之后");
   assert.ok(state.objectives >= 3, "本章重点应列出学习目标");
   assert.equal(state.headingAboveBody, "连续信号的分析", "章标题仍留在页面顶部");
-
-  /* 只保留"选择学习"：主线必学是默认状态，不再显示字样 */
   assert.equal(state.hasCoreLabel, false, "不应再出现「主线必学」字样");
-  assert.deepEqual(state.labels, ["选择学习"], "第 1 章只有 signals-ch1-advanced 一个小节是选学");
+
+  /* 收集全章「选择学习」标签：切到其余节确认只有 signals-ch1-advanced 为选学且切走后不重复出现「本章重点」 */
+  const allLabels = [];
+  for (let i = 0; i < 5; i += 1) {
+    if (i > 0) {
+      await page.locator(`#lessonPartNav .lesson-part-tab[data-part="${i}"]`).click();
+      await page.waitForTimeout(120);
+      assert.equal(await page.locator(".lesson-focus").count(), 0, "非第一节视图不再重复占用首屏重点卡片");
+    }
+    const labels = await page.evaluate(() =>
+      Array.from(document.querySelectorAll(".learning-section .importance-label")).map((node) => node.textContent.trim()),
+    );
+    allLabels.push(...labels);
+  }
+  assert.deepEqual(allLabels, ["选择学习"], "第 1 章只有 signals-ch1-advanced 一个小节是选学");
 
   await page.close();
 });
@@ -135,22 +161,26 @@ test("信号第 1 章：节分组条按教材目录渲染", async () => {
   const page = await browser.newPage();
   await openChapterOne(page);
 
-  const bars = await page.evaluate(() => {
-    const out = [];
-    for (const bar of document.querySelectorAll(".lesson-group")) {
-      const title = bar.querySelector("h2").textContent.trim();
-      let count = 0;
-      let first = null;
-      for (let node = bar.nextElementSibling; node; node = node.nextElementSibling) {
-        if (node.classList.contains("lesson-group")) break;
-        if (!node.classList.contains("learning-section")) continue;
-        if (!first) first = node.id.replace("section-", "");
-        count += 1;
-      }
-      out.push({ title, count, first });
+  const bars = [];
+  let firstGroupIds = [];
+  for (let i = 0; i < 5; i += 1) {
+    if (i > 0) {
+      await page.locator(`#lessonPartNav .lesson-part-tab[data-part="${i}"]`).click();
+      await page.waitForTimeout(120);
     }
-    return out;
-  });
+    const partInfo = await page.evaluate(() => {
+      const bar = document.querySelector(".lesson-group");
+      const sections = Array.from(document.querySelectorAll(".learning-section"));
+      return {
+        title: bar ? bar.querySelector("h2").textContent.trim() : "",
+        count: sections.length,
+        first: sections[0] ? sections[0].id.replace("section-", "") : null,
+        ids: sections.map((node) => node.id.replace("section-", "")),
+      };
+    });
+    bars.push({ title: partInfo.title, count: partInfo.count, first: partInfo.first });
+    if (i === 0) firstGroupIds = partInfo.ids;
+  }
 
   /* 只钉住"节的顺序 + 每节归属的第一个小节 + 第一节的 6 个小节"；
      第二至五节尚未细分，每节目前只有 1 个小节，不在这里写死 */
@@ -169,13 +199,7 @@ test("信号第 1 章：节分组条按教材目录渲染", async () => {
     "signals-ch1-advanced",
   ]);
   assert.equal(bars[0].count, 6, "第一节应包含 6 个小节");
-
-  const firstGroup = await page.evaluate(() =>
-    Array.from(document.querySelectorAll(".learning-section"))
-      .slice(0, 6)
-      .map((node) => node.id.replace("section-", "")),
-  );
-  assert.deepEqual(firstGroup, [
+  assert.deepEqual(firstGroupIds, [
     "signals-ch1-time-basic",
     "signals-ch1-time-singular",
     "signals-ch1-time-ops",
@@ -191,12 +215,10 @@ test("小节相关链接滚到锚点，跨课程联系切到另一门课的目�
   const page = await browser.newPage();
   await openChapterOne(page);
 
-  /* 小节内「相关」：跳到同课程的另一小节 */
+  /* 小节内「相关」：自动切到目标节并滚到对应小节 */
   const sectionLink = page.locator(".section-link").first();
   const sectionLabel = (await sectionLink.locator("strong").textContent()).trim();
   await sectionLink.click();
-  /* 等滚动真正停稳再判断落点：固定 sleep 在负载下会在滚动途中取样，
-     视口上半可能还没有目标小节（实测偶发停在 null）。 */
   await page.waitForTimeout(150);
   await settleScroll(page);
   const landed = await page.evaluate(() => {
@@ -212,9 +234,9 @@ test("小节相关链接滚到锚点，跨课程联系切到另一门课的目�
   assert.ok(sectionLabel.length > 0, "相关链接应显示目标小节名");
   assert.ok(landed.heading && sectionLabel.includes(landed.heading), `期望滚到「${sectionLabel}」，实际停在「${landed.heading}」`);
 
-  /* 章末「跨课程」：切到模拟/数字课程的目标章 */
-  await page.locator(".source-note").scrollIntoViewIfNeeded();
-  await page.waitForTimeout(200);
+  /* 巩固与检验视图下的「跨课程」：切到模拟/数字课程的目标章 */
+  await page.locator('#lessonPartNav .lesson-part-tab[data-part="resources"]').click();
+  await page.waitForTimeout(150);
   const crossItem = page.locator(".connection-group").last().locator(".connection-item").first();
   const crossLabel = (await crossItem.locator("strong").textContent()).trim();
   await crossItem.click();
@@ -236,6 +258,8 @@ test("前置联系切回绪论；键盘 Enter 同样能触发", async () => {
   const page = await browser.newPage();
   await openChapterOne(page);
 
+  await page.locator('#lessonPartNav .lesson-part-tab[data-part="resources"]').click();
+  await page.waitForTimeout(150);
   const prereq = page.locator(".connection-group").first().locator(".connection-item").first();
   assert.equal((await prereq.locator(".connection-kind").count()), 0);
   await prereq.focus();
@@ -252,7 +276,7 @@ test("前置联系切回绪论；键盘 Enter 同样能触发", async () => {
 });
 
 test("公式卡：KaTeX 全部渲染成功，变量说明齐全，390/760/1440 三档都不裁切", async () => {
-  /* 已按教材目录重写的小节都要过这一关：新增公式卡最容易在窄屏被裁切 */
+  /* 遍历第 1、2 章全部按节标签，确保每一节中的每张公式卡在三档视口均不裁切 */
   const chapters = [
     { label: "第1章", pattern: /第1章/, minCards: 8 },
     { label: "第2章", pattern: /第2章/, minCards: 13 },
@@ -266,25 +290,35 @@ test("公式卡：KaTeX 全部渲染成功，变量说明齐全，390/760/1440 �
       await page.getByRole("button", { name: chapter.pattern }).first().click();
       await page.waitForTimeout(700);
 
-      const state = await page.evaluate(() => ({
-        cards: document.querySelectorAll(".formula-block").length,
-        rendered: document.querySelectorAll(".math-formula .katex").length,
-        errors: Array.from(document.querySelectorAll(".katex-error")).map((node) => node.textContent.slice(0, 60)),
-        varRows: Array.from(document.querySelectorAll(".formula-block ul")).map((node) => node.children.length),
-        overflow: document.documentElement.scrollWidth - window.innerWidth,
-        /* 公式卡内部横向滚动 = 公式被裁切看不全，窄屏最容易出现 */
-        clipped: Array.from(document.querySelectorAll(".math-formula"))
-          .filter((node) => node.scrollWidth > node.clientWidth + 2)
-          .map((node) => node.closest(".learning-section")?.id.replace("section-", "") ?? "?"),
-      }));
+      let totalCards = 0;
+      const partTabs = page.locator('#lessonPartNav .lesson-part-tab:not([data-part="resources"])');
+      const count = await partTabs.count();
+      for (let i = 0; i < count; i += 1) {
+        if (i > 0) {
+          await page.locator(`#lessonPartNav .lesson-part-tab[data-part="${i}"]`).click();
+          await page.waitForTimeout(120);
+        }
+        const state = await page.evaluate(() => ({
+          cards: document.querySelectorAll(".formula-block").length,
+          rendered: document.querySelectorAll(".math-formula .katex").length,
+          errors: Array.from(document.querySelectorAll(".katex-error")).map((node) => node.textContent.slice(0, 60)),
+          varRows: Array.from(document.querySelectorAll(".formula-block ul")).map((node) => node.children.length),
+          overflow: document.documentElement.scrollWidth - window.innerWidth,
+          /* 公式卡内部横向滚动 = 公式被裁切看不全，窄屏最容易出现 */
+          clipped: Array.from(document.querySelectorAll(".math-formula"))
+            .filter((node) => node.scrollWidth > node.clientWidth + 2)
+            .map((node) => node.closest(".learning-section")?.id.replace("section-", "") ?? "?"),
+        }));
 
-      const where = `${chapter.label}/${width}px`;
-      assert.ok(state.cards >= chapter.minCards, `[${where}] 应有至少 ${chapter.minCards} 张公式卡，实际 ${state.cards}`);
-      assert.equal(state.rendered, state.cards, `[${where}] 每张公式卡都应渲染出 KaTeX`);
-      assert.deepEqual(state.errors, [], `[${where}] 不得有 KaTeX 渲染错误`);
-      assert.ok(state.varRows.every((count) => count >= 4), `[${where}] 每张卡的变量说明至少 4 条：${state.varRows}`);
-      assert.ok(state.overflow <= 1, `[${where}] 页面横向溢出 ${state.overflow}px`);
-      assert.deepEqual(state.clipped, [], `[${where}] 这些公式卡被裁切，需要拆行或缩字号：${state.clipped}`);
+        const where = `${chapter.label}-节${i + 1}/${width}px`;
+        totalCards += state.cards;
+        assert.equal(state.rendered, state.cards, `[${where}] 每张公式卡都应渲染出 KaTeX`);
+        assert.deepEqual(state.errors, [], `[${where}] 不得有 KaTeX 渲染错误`);
+        assert.ok(state.varRows.every((c) => c >= 4), `[${where}] 每张卡的变量说明至少 4 条：${state.varRows}`);
+        assert.ok(state.overflow <= 1, `[${where}] 页面横向溢出 ${state.overflow}px`);
+        assert.deepEqual(state.clipped, [], `[${where}] 这些公式卡被裁切，需要拆行或缩字号：${state.clipped}`);
+      }
+      assert.ok(totalCards >= chapter.minCards, `[${chapter.label}/${width}px] 全章应有至少 ${chapter.minCards} 张公式卡，实际 ${totalCards}`);
 
       await page.close();
     }

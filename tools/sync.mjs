@@ -31,6 +31,8 @@
 // 改端口用 PW3010 环境变量：$env:PW3010 = "D:\...\personal-workbench-shell-3010"
 //
 // 变更记录：
+//   v1.2.0  2026-11-21  纳入新增课程图解脚本 lesson-visuals.js，清理不存在的 workbench-design.css。
+//   v1.1.1  2026-10-03  将独立工作台样式加入运行文件清单，避免同步遗漏。
 //   v1.1.0  2026-09-11  新增 --build-inputs（完整构建输入，含 circuit-placement.ts）；
 //                       推送前检查目标侧未提交改动（脏则停止）；启动时校验归档副本是否过期。
 //   v1.0.0  2026-09-10  初版：运行文件/字体/测试的 status·push·pull·check。
@@ -41,7 +43,7 @@ import { spawn } from "node:child_process";
 import { dirname, join, relative, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 
-const SYNC_VERSION = "1.1.0";
+const SYNC_VERSION = "1.2.0";
 
 const HERE = fileURLToPath(new URL(".", import.meta.url));
 const SOURCE = resolve(process.env.PW3010 ?? join(HERE, "..", "personal-workbench-shell-3010"));
@@ -49,6 +51,7 @@ const SOURCE = resolve(process.env.PW3010 ?? join(HERE, "..", "personal-workbenc
 const RUNTIME_FILES = [
   "index.html",
   "styles.css",
+  "lesson-visuals.js",
   "app.js",
   "courses.js",
   "katex.min.css",

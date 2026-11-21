@@ -6,7 +6,7 @@ import assert from 'node:assert/strict';
 
 const root = fileURLToPath(new URL('.', import.meta.url));
 const out = join(root, 'dist-pages'); // fixed generated-output directory only
-const files = ['index.html', 'styles.css', 'app.js', 'courses.js',
+const files = ['index.html', 'styles.css', 'lesson-visuals.js', 'app.js', 'courses.js',
   'workbench.bundle.js', 'workbench.bundle.css', 'katex.bundle.js', 'katex.min.css'];
 const html = await readFile(join(root, 'index.html'), 'utf8');
 for (const [, asset] of html.matchAll(/(?:src|href)="([^"]+)"/g)) {
